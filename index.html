@@ -85,11 +85,16 @@
         <input id="look" value="9000" />
       </div>
       <div>
+        <label>Mulai dari blok (opsional)</label>
+        <input id="startblk" placeholder="mis. 129200000" />
+      </div>
+      <div>
         <label>Interval (menit)</label>
         <input id="every" value="7" />
       </div>
       <div style="display:flex;gap:8px">
         <button id="scan">Scan</button>
+        <button id="deep" class="ghost" title="Pindai dari blok awal (untuk posisi lama)">Deep</button>
         <button id="save" class="ghost">Simpan</button>
       </div>
     </div>
@@ -214,7 +219,7 @@ function saveCfg(){
 }
 
 /* ================= scan ================= */
-let scanning=false,timer=null,ticking=null,paused=false;
+let scanning=false,timer=null,ticking=null,paused=false,startFrom=null;
 const intervalMs=()=>Math.max(1,Number($('every').value)||7)*60000;
 const ck=()=>{const a=$('addr').value.trim();return loadCache(a);};
 const lastScanAt=()=>ck()?.at||0;
@@ -237,7 +242,8 @@ async function scan(manual,forceFull){
 
     // ---- INKREMENTAL: mulai dari blok terakhir yang sudah discan ----
     let from, mode;
-    if(prev&&prev.lastBlock&&prev.lastBlock<=head){
+    if(startFrom!=null){ from=Math.max(0,startFrom); mode='penuh'; startFrom=null; }
+    else if(prev&&prev.lastBlock&&prev.lastBlock<=head){
       from=prev.lastBlock+1; mode='inkremental';
     }else{
       from=Math.max(0,head-look); mode='penuh';
@@ -316,7 +322,9 @@ async function scan(manual,forceFull){
     const bnb=u(BigInt(bnbHex)), usdtBal=u(BigInt(usdtHex));
 
     // ---- posisi terbuka: hanya token yang pernah kita pegang ----
-    const allIds=[...new Set(rows.flatMap(r=>r.tokenIds||[]))];
+    const idSet=new Set([...(prev?.ids||[])]);
+    for(const r of rows) for(const id of (r.tokenIds||[])) idSet.add(id);
+    const allIds=[...idSet];
     const pos=[];
     for(const id of allIds){
       const data='0x00fdd58e'+meTopic.slice(2)+BigInt(id).toString(16).padStart(64,'0');
@@ -326,7 +334,7 @@ async function scan(manual,forceFull){
     }
 
     const gasTotal=rows.reduce((s,r)=>s+(r.gas||0),0);
-    const result={at:Date.now(),from,head,lastBlock:head,mode,addr:ME,rows,pos,gasTotal,bnb,usdt:usdtBal};
+    const result={at:Date.now(),from,head,lastBlock:head,mode,addr:ME,rows,pos,gasTotal,bnb,usdt:usdtBal,ids:allIds};
     saveCache(ME,result);
     render(result);
     $('status').textContent=`selesai · ${mode} · ${fresh.length} tx baru · total ${rows.length} tx`;
@@ -352,7 +360,8 @@ function render(res){
   $('usdt').textContent=fmt(res.usdt,4);
   $('bnb').textContent=fmt(res.bnb,5);
   $('wl').textContent=`${wins} / ${losses}`;
-  $('open').textContent=pos.length?`${pos.length} (${fmt(pos.reduce((s,p)=>s+p.shares,0))} sh)`:'0';
+  const checked=(res.ids||[]).length;
+  $('open').textContent=pos.length?`${pos.length} (${fmt(pos.reduce((s,p)=>s+p.shares,0))} sh)`:(checked?`0 / ${checked} token`:'0');
   $('gas').textContent=fmt(res.gasTotal,6);
   $('lastTxt').textContent=new Date(res.at).toLocaleTimeString('id-ID');
   $('blkTxt').textContent=res.lastBlock??'—';
@@ -414,6 +423,19 @@ const boot=ck();
 if(boot&&boot.rows){ render(boot); $('status').textContent=`cache ${new Date(boot.at).toLocaleTimeString('id-ID')} · lanjut dari blok ${boot.lastBlock}`; }
 
 $('save').addEventListener('click',saveCfg);
+$('deep').addEventListener('click',()=>{
+  const v=Number($('startblk').value||0);
+  if(v>0){
+    startFrom=v;
+    flashOk(`Deep scan dari blok ${v} — bisa makan waktu…`);
+  }else{
+    const cur=Number($('look').value)||9000;
+    $('look').value=Math.max(cur,50000);   // batas aman: 50k blok
+    startFrom=null;
+    flashOk('Deep scan: lookback dinaikkan ke '+$('look').value+' blok.');
+  }
+  scan(true,true);
+});
 $('scan').addEventListener('click',()=>scan(true));
 $('toggle').addEventListener('click',()=>{
   paused=!paused;
