@@ -174,48 +174,73 @@ const cacheKey=(addr)=>K_CACHE+addr.toLowerCase();
 const loadCache=(addr)=>{try{return JSON.parse(localStorage.getItem(cacheKey(addr))||'null');}catch(_){return null;}};
 const saveCache=(addr,o)=>localStorage.setItem(cacheKey(addr),JSON.stringify(o));
 
-let RPC='',ID=0;
-async function rpc(method,params){
-  const res=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},
-    body:JSON.stringify({jsonrpc:'2.0',id:++ID,method,params})});
-  if(!res.ok) throw new Error(`RPC HTTP ${res.status} — cek URL/key`);
+let RPC='',ID=0,lastCall=0,RPC_GAP=90;
+const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
+
+/* --- satu panggilan RPC: timeout, pesan error jelas --- */
+async function rpcOnce(method,params){
+  const gap=RPC_GAP-(Date.now()-lastCall);
+  if(gap>0) await sleep(gap);
+  lastCall=Date.now();
+  const ctrl=new AbortController();
+  const to=setTimeout(()=>ctrl.abort(),30000);
+  let res;
+  try{
+    res=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({jsonrpc:'2.0',id:++ID,method,params}),signal:ctrl.signal});
+  }catch(e){
+    clearTimeout(to);
+    if(e.name==='AbortError') throw new Error(`Timeout 30s (${method}) — RPC terlalu lambat`);
+    throw new Error(`Failed to fetch (${method}) — biasanya karena domain ini belum diizinkan di Alchemy (Allowed Origins) atau koneksi diblokir`);
+  }
+  clearTimeout(to);
+  if(!res.ok){
+    if(res.status===429) throw new Error('Rate limit Alchemy (429) — tunggu sebentar atau naikkan kuota');
+    if(res.status===401||res.status===403) throw new Error(`RPC ${res.status} — key ditolak / domain tidak diizinkan`);
+    throw new Error(`RPC HTTP ${res.status} (${method})`);
+  }
   const j=await res.json();
   if(j.error) throw new Error(j.error.message||JSON.stringify(j.error));
   return j.result;
 }
+async function rpc(method,params,retries=2){
+  for(let i=0;i<=retries;i++){
+    try{ return await rpcOnce(method,params); }
+    catch(e){
+      const m=e.message||'';
+      if(/Failed to fetch|Timeout|429/.test(m)&&i<retries){
+        RPC_GAP=Math.min(RPC_GAP*2,700);
+        await sleep(600*(i+1));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
 const hex=(n)=>'0x'+Number(n).toString(16);
 
-async function getLogsChunked(address,topics,fromBlock,toBlock){
+/* --- getLogs per chunk, dengan progress + tidak menelan error jaringan --- */
+async function getLogsChunked(address,topics,fromBlock,toBlock,onProgress){
   const out=[];
+  let i=0;
+  const total=Math.ceil((toBlock-fromBlock+1)/CHUNK);
   for(let f=fromBlock;f<=toBlock;f+=CHUNK){
     const t=Math.min(f+CHUNK-1,toBlock);
     try{
       out.push(...await rpc('eth_getLogs',[{address,fromBlock:hex(f),toBlock:hex(t),topics}]));
     }catch(e){
-      if(t-f>50){
+      const m=e.message||'';
+      if(/Failed to fetch|Timeout|429|diizinkan|ditolak/.test(m)) throw e;   // jangan sembunyikan
+      if(t-f>50){                                                            // provider batasi range: pecah
         const mid=Math.floor((f+t)/2);
-        const a=await rpc('eth_getLogs',[{address,fromBlock:hex(f),toBlock:hex(mid),topics}]).catch(()=>[]);
-        const b=await rpc('eth_getLogs',[{address,fromBlock:hex(mid+1),toBlock:hex(t),topics}]).catch(()=>[]);
-        out.push(...a,...b);
+        out.push(...await rpc('eth_getLogs',[{address,fromBlock:hex(f),toBlock:hex(mid),topics}]).catch(()=>[]));
+        out.push(...await rpc('eth_getLogs',[{address,fromBlock:hex(mid+1),toBlock:hex(t),topics}]).catch(()=>[]));
       }
     }
+    i++;
+    onProgress&&onProgress(t,i,total);
   }
   return out;
-}
-
-/* ================= konfigurasi UI ================= */
-function loadCfg(){
-  const c={...DEFAULTS};
-  try{Object.assign(c,JSON.parse(localStorage.getItem(K_CFG)||'{}'));}catch(_){}
-  $('rpc').value=c.rpc||''; $('addr').value=c.addr||DEFAULTS.addr;
-  $('look').value=c.look||DEFAULTS.look; $('every').value=c.every||DEFAULTS.every;
-}
-function saveCfg(){
-  const c={rpc:$('rpc').value.trim(),addr:$('addr').value.trim(),
-    look:Number($('look').value)||9000,every:Math.max(1,Number($('every').value)||7)};
-  localStorage.setItem(K_CFG,JSON.stringify(c));
-  flashOk(`Disimpan. RPC dipanggil tiap ${c.every} menit. Data & key tetap di browser ini.`);
-  schedule();
 }
 
 /* ================= scan ================= */
@@ -229,53 +254,61 @@ async function scan(manual,forceFull){
   const remain=lastScanAt()+intervalMs()-Date.now();
   if(manual&&!forceFull&&remain>0){ flashOk(`Dibatasi: refresh berikutnya dalam ${hhmmss(remain)}.`); return; }
 
-  scanning=true; $('scan').disabled=true; $('err').style.display='none';
+  scanning=true; $('scan').disabled=true; $('deep').disabled=true; $('err').style.display='none';
   try{
     RPC=$('rpc').value.trim();
     const ME=$('addr').value.trim();
     if(!RPC) throw new Error('Isi RPC URL dulu (Alchemy BSC endpoint).');
     if(!/^0x[0-9a-fA-F]{40}$/.test(ME)) throw new Error('Alamat tidak valid.');
 
+    // uji ringan dulu: kalau ini gagal, tidak ada gunanya lanjut
+    $('status').textContent='menguji koneksi…';
     const head=Number(await rpc('eth_blockNumber',[]));
+
     const prev=forceFull?null:loadCache(ME);
     const look=Math.min(Number($('look').value)||9000,200000);
 
-    // ---- INKREMENTAL: mulai dari blok terakhir yang sudah discan ----
     let from, mode;
-    if(startFrom!=null){ from=Math.max(0,startFrom); mode='penuh'; startFrom=null; }
-    else if(prev&&prev.lastBlock&&prev.lastBlock<=head){
+    if(startFrom!=null){
+      from=Math.max(0,startFrom); mode='penuh'; startFrom=null;
+    }else if(prev&&prev.lastBlock&&prev.lastBlock<=head){
       from=prev.lastBlock+1; mode='inkremental';
     }else{
       from=Math.max(0,head-look); mode='penuh';
     }
+
+    // --- resume deep scan yang terputus ---
+    const deepPrev=loadCache(ME);
+    if(forceFull&&deepPrev&&deepPrev.deepFrom!=null&&deepPrev.deepFrom<from) from=deepPrev.deepFrom;
+
     const noNew=from>head;
     if(noNew) from=head;
     $('modeTxt').textContent=mode;
-    $('status').textContent=noNew?`tidak ada blok baru · cek saldo…`:`memindai ${from} → ${head} (${mode})…`;
+    const totalChunks=Math.ceil((head-from+1)/CHUNK);
+    $('status').textContent=noNew?'tidak ada blok baru · cek saldo…':`${mode} · ${from}→${head} · 0/${totalChunks} chunk`;
 
     const meTopic=pad(ME);
-    let mints=[],usdtOut=[],usdtIn=[];
+    let mints=[],payIn=[];
     if(!noNew){
-      [mints,usdtOut,usdtIn]=await Promise.all([
-        getLogsChunked(CTF,[TOPIC_1155,null,null,meTopic],from,head),
-        getLogsChunked(USDT,[TOPIC_TRANSFER,meTopic],from,head),
-        getLogsChunked(USDT,[TOPIC_TRANSFER,null,meTopic],from,head),
-      ]);
+      const prog=(t,i,tot)=>{
+        $('status').textContent=`${mode} · chunk ${i}/${tot} · blok ${t}`;
+        if(forceFull&&i%20===0){                       // simpan progres supaya bisa dilanjutkan
+          try{ saveCache(ME,{...(deepPrev||{}),deepFrom:t+1,at:Date.now(),addr:ME}); }catch(_){}
+        }
+      };
+      mints=await getLogsChunked(CTF,[TOPIC_1155,null,null,meTopic],from,head,prog);
+      payIn=await getLogsChunked(USDT,[TOPIC_TRANSFER,null,meTopic],from,head,prog);
     }
 
+    /* --- kelipatan: hanya tx yang punya mint 1155 = BUY; payout dari CTF = REDEEM --- */
     const tx={};
-    const at=(h)=>(tx[h]=tx[h]||{buy:0,payout:0,shares:0,ids:new Set()});
+    const at=(h)=>(tx[h]=tx[h]||{payout:0,shares:0,ids:new Set()});
     for(const l of mints){
       const id=BigInt('0x'+l.data.slice(2,66)).toString();
       const val=u(BigInt('0x'+l.data.slice(66,130)));
       const t=at(l.transactionHash); t.shares+=val; t.ids.add(id);
     }
-    for(const l of usdtOut){
-      const to='0x'+l.topics[2].slice(26);
-      if(to.toLowerCase()===ME.toLowerCase()) continue;
-      at(l.transactionHash).buy+=u(BigInt(l.data));
-    }
-    for(const l of usdtIn){
+    for(const l of payIn){
       const f='0x'+l.topics[1].slice(26);
       if(f.toLowerCase()!==CTF.toLowerCase()) continue;
       at(l.transactionHash).payout+=u(BigInt(l.data));
@@ -283,45 +316,58 @@ async function scan(manual,forceFull){
 
     const hashes=Object.keys(tx).filter(h=>tx[h].shares>0||tx[h].payout>0);
     const fresh=[];
-    let gasTotalNew=0,gasTouched=false;
-    for(const h of hashes.slice(0,300)){
-      let gas=gasCache[h],block=null;
+    let gasTouched=false;
+    for(const h of hashes.slice(0,400)){
+      let gas=gasCache[h],block=null,buyCost=null;
       if(gas===undefined){
         const r=await rpc('eth_getTransactionReceipt',[h]).catch(()=>null);
         gas=r?u(BigInt(r.gasUsed)*BigInt(r.effectiveGasPrice||r.gasPrice||'0x0')):0;
         block=r?Number(r.blockNumber):0;
         gasCache[h]=gas; gasTouched=true;
       }
-      gasTotalNew+=gas;
       const isBuy=tx[h].shares>0;
-      fresh.push({
-        block, hash:h, type:isBuy?'BUY':'REDEEM',
-        tokenIds:[...tx[h].ids], shares:tx[h].shares,
-        usdt:isBuy?tx[h].buy:tx[h].payout, gas,
-        pnl:isBuy?-tx[h].buy:tx[h].payout
-      });
+      fresh.push({block,hash:h,type:isBuy?'BUY':'REDEEM',tokenIds:[...tx[h].ids],
+        shares:tx[h].shares,usdt:tx[h].payout,gas,pnl:isBuy?null:tx[h].payout});
     }
     if(gasTouched) saveGas();
 
-    // ---- gabungkan dengan cache lama (tidak memanggil ulang blok lama) ----
+    /* --- biaya beli diambil dari receipt (USDT keluar dari wallet di tx yang sama) --- */
+    for(const r of fresh){
+      if(r.type!=='BUY') continue;
+      const rc=await rpc('eth_getTransactionReceipt',[r.hash]).catch(()=>null);
+      let spent=0;
+      if(rc){
+        for(const l of rc.logs){
+          if(l.address.toLowerCase()!==USDT.toLowerCase()) continue;
+          if(l.topics[0]!==TOPIC_TRANSFER||l.data==='0x') continue;
+          const from='0x'+l.topics[1].slice(26);
+          if(from.toLowerCase()===ME.toLowerCase()) spent+=u(BigInt(l.data));
+        }
+      }
+      r.usdt=spent; r.pnl=-spent;
+    }
+
+    // blok untuk baris lama yang belum punya nomor
+    let fb=head;
+    for(const r of fresh){ if(!r.block) r.block=--fb; }
+
+    /* --- gabung dengan cache lama --- */
     const map=new Map();
     for(const r of (prev?.rows||[])) map.set(r.hash,r);
     for(const r of fresh) map.set(r.hash,r);
     const rows=[...map.values()];
-
-    // blok untuk baris lama yang belum punya nomor
-    let fb=head;
-    for(const r of rows){ if(!r.block){ r.block=--fb; } }
+    let fb2=head;
+    for(const r of rows){ if(!r.block) r.block=--fb2; }
     rows.sort((a,b)=>a.block-b.block);
 
-    // ---- saldo (2 panggilan) ----
+    /* --- saldo --- */
     const [bnbHex,usdtHex]=await Promise.all([
       rpc('eth_getBalance',[ME,'latest']),
       rpc('eth_call',[{to:USDT,data:'0x70a08231'+meTopic.slice(2)},'latest']),
     ]);
     const bnb=u(BigInt(bnbHex)), usdtBal=u(BigInt(usdtHex));
 
-    // ---- posisi terbuka: hanya token yang pernah kita pegang ----
+    /* --- posisi terbuka: semua token yang pernah kita pegang --- */
     const idSet=new Set([...(prev?.ids||[])]);
     for(const r of rows) for(const id of (r.tokenIds||[])) idSet.add(id);
     const allIds=[...idSet];
@@ -334,14 +380,15 @@ async function scan(manual,forceFull){
     }
 
     const gasTotal=rows.reduce((s,r)=>s+(r.gas||0),0);
-    const result={at:Date.now(),from,head,lastBlock:head,mode,addr:ME,rows,pos,gasTotal,bnb,usdt:usdtBal,ids:allIds};
+    const result={at:Date.now(),from,head,lastBlock:head,mode,addr:ME,rows,pos,gasTotal,bnb,usdt:usdtBal,ids:allIds,deepFrom:null};
     saveCache(ME,result);
     render(result);
     $('status').textContent=`selesai · ${mode} · ${fresh.length} tx baru · total ${rows.length} tx`;
   }catch(e){
-    showErr(e.message||String(e)); $('status').textContent='gagal';
+    showErr(e.message||String(e));
+    $('status').textContent='gagal';
   }finally{
-    scanning=false; $('scan').disabled=false; schedule();
+    scanning=false; $('scan').disabled=false; $('deep').disabled=false; schedule();
   }
 }
 
