@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ptah Prediction — On-chain Dashboard</title>
+<style>
+  :root{
+    --bg:#0a0c11;--card:#131722;--line:#232b3d;
+    --txt:#e9edf5;--dim:#8992a7;--up:#27d17c;--down:#ff5d5d;--accent:#f0b90b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 20% -10%,#16203300,#0a0c11),var(--bg);color:var(--txt);
+       font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:1100px;margin:0 auto;padding:26px 18px 70px}
+  header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:20px}
+  h1{font-size:19px;margin:0}
+  h1 b{color:var(--accent)}
+  .muted{color:var(--dim);font-size:13px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .panel h2{margin:0 0 12px;font-size:12px;letter-spacing:.7px;text-transform:uppercase;color:var(--dim)}
+  .cfg{display:grid;grid-template-columns:1.7fr 1.3fr .55fr .55fr auto;gap:10px;align-items:end;margin-bottom:14px}
+  @media(max-width:900px){.cfg{grid-template-columns:1fr 1fr}}
+  label{display:block;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+  input{width:100%;background:#0f1420;border:1px solid var(--line);border-radius:9px;color:var(--txt);padding:9px 11px;font-size:13.5px}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accent);color:#141005;border:0;border-radius:9px;padding:10px 16px;font-weight:700;font-size:13.5px;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{background:#1e2637;color:var(--txt);border:1px solid var(--line)}
+  button.danger{background:#2a1a1e;color:#ff9d9d;border:1px solid #4a2730}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:12px;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+  .card .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+  .card .v{font-size:23px;font-weight:650;margin-top:6px;font-variant-numeric:tabular-nums}
+  .v.pos{color:var(--up)} .v.neg{color:var(--down)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;font-variant-numeric:tabular-nums}
+  th{text-align:left;color:var(--dim);font-weight:500;font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;padding:7px 8px;border-bottom:1px solid var(--line)}
+  td{padding:8px;border-bottom:1px solid #1a2130}
+  tr:last-child td{border-bottom:none}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:700}
+  .badge.buy{background:rgba(240,185,11,.15);color:var(--accent)}
+  .badge.redeem{background:rgba(39,209,124,.15);color:var(--up)}
+  .note{background:rgba(240,185,11,.08);border:1px solid rgba(240,185,11,.35);border-radius:12px;padding:12px 14px;font-size:13px;color:#e7d9a8;margin-bottom:16px}
+  .err{background:rgba(255,93,93,.1);border:1px solid rgba(255,93,93,.4);color:#ffb3b3;padding:10px 14px;border-radius:10px;margin-bottom:14px;display:none;font-size:13px}
+  .ok{background:rgba(39,209,124,.08);border:1px solid rgba(39,209,124,.3);color:#a9f0cd;padding:8px 12px;border-radius:10px;font-size:12.5px;display:none}
+  .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px}
+  .pill{background:#1b2231;border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:12.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .pill b{color:var(--txt);font-weight:600}
+  a{color:#9fc2ff}
+  svg{display:block;width:100%;height:120px}
+  .foot{margin-top:20px;text-align:center;color:var(--dim);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1><b>Ptah</b> Prediction — On-chain Dashboard</h1>
+      <div class="muted">Dihitung dari BNB Chain · tanpa server · scan inkremental (data lama tidak dipanggil ulang)</div>
+    </div>
+    <div class="muted" id="status">siap</div>
+  </header>
+
+  <div class="note">
+    <b>Yang bisa dan tidak bisa dilihat on-chain.</b><br>
+    ✅ Saldo USDT/BNB · setiap beli (USDT keluar + share ERC-1155 masuk) · setiap redeem (share dibakar + USDT masuk) ·
+    gas · posisi terbuka · PnL kumulatif.<br>
+    ❌ Order book, harga ask/bid, probabilitas model, besar edge — semuanya off-chain.
+  </div>
+
+  <div class="panel" style="margin-bottom:16px">
+    <h2>Koneksi, jadwal &amp; cache</h2>
+    <div class="cfg">
+      <div>
+        <label>RPC URL (Alchemy / BSC)</label>
+        <input id="rpc" placeholder="https://bnb-mainnet.g.alchemy.com/v2/KEY_ANDA" />
+      </div>
+      <div>
+        <label>Alamat agent wallet</label>
+        <input id="addr" placeholder="0x..." />
+      </div>
+      <div>
+        <label>Lookback awal (blok)</label>
+        <input id="look" value="9000" />
+      </div>
+      <div>
+        <label>Interval (menit)</label>
+        <input id="every" value="7" />
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="scan">Scan</button>
+        <button id="save" class="ghost">Simpan</button>
+      </div>
+    </div>
+    <div class="bar">
+      <span class="pill">Auto: <b id="autoTxt">—</b></span>
+      <span class="pill">RPC berikutnya: <b id="nextTxt">—</b></span>
+      <span class="pill">Data terakhir: <b id="lastTxt">belum ada</b></span>
+      <span class="pill">Blok terpindai s/d: <b id="blkTxt">—</b></span>
+      <span class="pill">Mode scan: <b id="modeTxt">—</b></span>
+      <button id="toggle" class="ghost" style="padding:6px 12px;font-size:12.5px">Pause auto</button>
+      <button id="reset" class="danger" style="padding:6px 12px;font-size:12.5px">Reset cache</button>
+    </div>
+    <div class="err" id="err"></div>
+    <div class="ok" id="ok"></div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="k">PnL kumulatif</div><div class="v" id="pnl">—</div></div>
+    <div class="card"><div class="k">Saldo USDT</div><div class="v" id="usdt">—</div></div>
+    <div class="card"><div class="k">Saldo BNB</div><div class="v" id="bnb">—</div></div>
+    <div class="card"><div class="k">Menang / Kalah</div><div class="v" id="wl">—</div></div>
+    <div class="card"><div class="k">Posisi terbuka</div><div class="v" id="open">—</div></div>
+    <div class="card"><div class="k">Total gas</div><div class="v" id="gas">—</div></div>
+  </div>
+
+  <div class="panel" style="margin-bottom:16px">
+    <h2>Kurva PnL (kumulatif per transaksi)</h2>
+    <svg id="chart" viewBox="0 0 600 120" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div class="panel" style="margin-bottom:16px">
+    <h2>Transaksi on-chain</h2>
+    <table>
+      <thead><tr><th>Blok</th><th>Tipe</th><th>Token ID</th><th>Share</th><th>USDT</th><th>PnL</th><th>Gas (BNB)</th><th>Tx</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="8" class="muted">belum ada data — isi RPC lalu tekan Scan</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Posisi terbuka</h2>
+    <table>
+      <thead><tr><th>Token ID</th><th>Share</th><th>Nilai nominal jika menang</th></tr></thead>
+      <tbody id="pos"><tr><td colspan="3" class="muted">tidak ada posisi terbuka</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="foot">Key &amp; data tersimpan hanya di localStorage browser ini · tidak ada yang dikirim ke pihak ketiga</div>
+</div>
+
+<script>
+/* ================= konfigurasi ================= */
+const DEFAULTS={rpc:'',addr:'0x9707C99D8247fBBB5E806a389160372602578009',look:9000,every:7};
+const USDT='0x55d398326f99059fF775485246999027B3197955';
+const CTF ='0x22da1810b194ca018378464a58f6ac2b10c9d244';
+const TOPIC_TRANSFER='0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const TOPIC_1155='0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62';
+const CHUNK=900;
+const K_CFG='ptah_cfg_v2';
+const K_CACHE='ptah_cache_v2_';   // + alamat
+const K_GAS='ptah_gas_v2';
+
+/* ================= util ================= */
+const $=(id)=>document.getElementById(id);
+const pad=(a)=>'0x'+a.toLowerCase().replace(/^0x/,'').padStart(64,'0');
+const u=(v)=>Number(v)/1e18;
+const fmt=(n,d=2)=>(n===null||n===undefined||isNaN(n))?'—':Number(n).toFixed(d);
+const signed=(n,d=2)=>(n>0?'+':'')+Number(n).toFixed(d);
+const cls=(n)=>n>0?'pos':(n<0?'neg':'');
+const hhmmss=(ms)=>{const s=Math.max(0,Math.round(ms/1000));return `${Math.floor(s/60)}m ${String(s%60).padStart(2,'0')}s`;};
+function flashOk(t){const e=$('ok');e.textContent=t;e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',4000);}
+function showErr(t){const e=$('err');e.textContent=t;e.style.display='block';}
+
+const gasCache=JSON.parse(localStorage.getItem(K_GAS)||'{}');
+const saveGas=()=>localStorage.setItem(K_GAS,JSON.stringify(gasCache));
+
+const cacheKey=(addr)=>K_CACHE+addr.toLowerCase();
+const loadCache=(addr)=>{try{return JSON.parse(localStorage.getItem(cacheKey(addr))||'null');}catch(_){return null;}};
+const saveCache=(addr,o)=>localStorage.setItem(cacheKey(addr),JSON.stringify(o));
+
+let RPC='',ID=0;
+async function rpc(method,params){
+  const res=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({jsonrpc:'2.0',id:++ID,method,params})});
+  if(!res.ok) throw new Error(`RPC HTTP ${res.status} — cek URL/key`);
+  const j=await res.json();
+  if(j.error) throw new Error(j.error.message||JSON.stringify(j.error));
+  return j.result;
+}
+const hex=(n)=>'0x'+Number(n).toString(16);
+
+async function getLogsChunked(address,topics,fromBlock,toBlock){
+  const out=[];
+  for(let f=fromBlock;f<=toBlock;f+=CHUNK){
+    const t=Math.min(f+CHUNK-1,toBlock);
+    try{
+      out.push(...await rpc('eth_getLogs',[{address,fromBlock:hex(f),toBlock:hex(t),topics}]));
+    }catch(e){
+      if(t-f>50){
+        const mid=Math.floor((f+t)/2);
+        const a=await rpc('eth_getLogs',[{address,fromBlock:hex(f),toBlock:hex(mid),topics}]).catch(()=>[]);
+        const b=await rpc('eth_getLogs',[{address,fromBlock:hex(mid+1),toBlock:hex(t),topics}]).catch(()=>[]);
+        out.push(...a,...b);
+      }
+    }
+  }
+  return out;
+}
+
+/* ================= konfigurasi UI ================= */
+function loadCfg(){
+  const c={...DEFAULTS};
+  try{Object.assign(c,JSON.parse(localStorage.getItem(K_CFG)||'{}'));}catch(_){}
+  $('rpc').value=c.rpc||''; $('addr').value=c.addr||DEFAULTS.addr;
+  $('look').value=c.look||DEFAULTS.look; $('every').value=c.every||DEFAULTS.every;
+}
+function saveCfg(){
+  const c={rpc:$('rpc').value.trim(),addr:$('addr').value.trim(),
+    look:Number($('look').value)||9000,every:Math.max(1,Number($('every').value)||7)};
+  localStorage.setItem(K_CFG,JSON.stringify(c));
+  flashOk(`Disimpan. RPC dipanggil tiap ${c.every} menit. Data & key tetap di browser ini.`);
+  schedule();
+}
+
+/* ================= scan ================= */
+let scanning=false,timer=null,ticking=null,paused=false;
+const intervalMs=()=>Math.max(1,Number($('every').value)||7)*60000;
+const ck=()=>{const a=$('addr').value.trim();return loadCache(a);};
+const lastScanAt=()=>ck()?.at||0;
+
+async function scan(manual,forceFull){
+  if(scanning) return;
+  const remain=lastScanAt()+intervalMs()-Date.now();
+  if(manual&&!forceFull&&remain>0){ flashOk(`Dibatasi: refresh berikutnya dalam ${hhmmss(remain)}.`); return; }
+
+  scanning=true; $('scan').disabled=true; $('err').style.display='none';
+  try{
+    RPC=$('rpc').value.trim();
+    const ME=$('addr').value.trim();
+    if(!RPC) throw new Error('Isi RPC URL dulu (Alchemy BSC endpoint).');
+    if(!/^0x[0-9a-fA-F]{40}$/.test(ME)) throw new Error('Alamat tidak valid.');
+
+    const head=Number(await rpc('eth_blockNumber',[]));
+    const prev=forceFull?null:loadCache(ME);
+    const look=Math.min(Number($('look').value)||9000,200000);
+
+    // ---- INKREMENTAL: mulai dari blok terakhir yang sudah discan ----
+    let from, mode;
+    if(prev&&prev.lastBlock&&prev.lastBlock<=head){
+      from=prev.lastBlock+1; mode='inkremental';
+    }else{
+      from=Math.max(0,head-look); mode='penuh';
+    }
+    const noNew=from>head;
+    if(noNew) from=head;
+    $('modeTxt').textContent=mode;
+    $('status').textContent=noNew?`tidak ada blok baru · cek saldo…`:`memindai ${from} → ${head} (${mode})…`;
+
+    const meTopic=pad(ME);
+    let mints=[],usdtOut=[],usdtIn=[];
+    if(!noNew){
+      [mints,usdtOut,usdtIn]=await Promise.all([
+        getLogsChunked(CTF,[TOPIC_1155,null,null,meTopic],from,head),
+        getLogsChunked(USDT,[TOPIC_TRANSFER,meTopic],from,head),
+        getLogsChunked(USDT,[TOPIC_TRANSFER,null,meTopic],from,head),
+      ]);
+    }
+
+    const tx={};
+    const at=(h)=>(tx[h]=tx[h]||{buy:0,payout:0,shares:0,ids:new Set()});
+    for(const l of mints){
+      const id=BigInt('0x'+l.data.slice(2,66)).toString();
+      const val=u(BigInt('0x'+l.data.slice(66,130)));
+      const t=at(l.transactionHash); t.shares+=val; t.ids.add(id);
+    }
+    for(const l of usdtOut){
+      const to='0x'+l.topics[2].slice(26);
+      if(to.toLowerCase()===ME.toLowerCase()) continue;
+      at(l.transactionHash).buy+=u(BigInt(l.data));
+    }
+    for(const l of usdtIn){
+      const f='0x'+l.topics[1].slice(26);
+      if(f.toLowerCase()!==CTF.toLowerCase()) continue;
+      at(l.transactionHash).payout+=u(BigInt(l.data));
+    }
+
+    const hashes=Object.keys(tx).filter(h=>tx[h].shares>0||tx[h].payout>0);
+    const fresh=[];
+    let gasTotalNew=0,gasTouched=false;
+    for(const h of hashes.slice(0,300)){
+      let gas=gasCache[h],block=null;
+      if(gas===undefined){
+        const r=await rpc('eth_getTransactionReceipt',[h]).catch(()=>null);
+        gas=r?u(BigInt(r.gasUsed)*BigInt(r.effectiveGasPrice||r.gasPrice||'0x0')):0;
+        block=r?Number(r.blockNumber):0;
+        gasCache[h]=gas; gasTouched=true;
+      }
+      gasTotalNew+=gas;
+      const isBuy=tx[h].shares>0;
+      fresh.push({
+        block, hash:h, type:isBuy?'BUY':'REDEEM',
+        tokenIds:[...tx[h].ids], shares:tx[h].shares,
+        usdt:isBuy?tx[h].buy:tx[h].payout, gas,
+        pnl:isBuy?-tx[h].buy:tx[h].payout
+      });
+    }
+    if(gasTouched) saveGas();
+
+    // ---- gabungkan dengan cache lama (tidak memanggil ulang blok lama) ----
+    const map=new Map();
+    for(const r of (prev?.rows||[])) map.set(r.hash,r);
+    for(const r of fresh) map.set(r.hash,r);
+    const rows=[...map.values()];
+
+    // blok untuk baris lama yang belum punya nomor
+    let fb=head;
+    for(const r of rows){ if(!r.block){ r.block=--fb; } }
+    rows.sort((a,b)=>a.block-b.block);
+
+    // ---- saldo (2 panggilan) ----
+    const [bnbHex,usdtHex]=await Promise.all([
+      rpc('eth_getBalance',[ME,'latest']),
+      rpc('eth_call',[{to:USDT,data:'0x70a08231'+meTopic.slice(2)},'latest']),
+    ]);
+    const bnb=u(BigInt(bnbHex)), usdtBal=u(BigInt(usdtHex));
+
+    // ---- posisi terbuka: hanya token yang pernah kita pegang ----
+    const allIds=[...new Set(rows.flatMap(r=>r.tokenIds||[]))];
+    const pos=[];
+    for(const id of allIds){
+      const data='0x00fdd58e'+meTopic.slice(2)+BigInt(id).toString(16).padStart(64,'0');
+      const bal=await rpc('eth_call',[{to:CTF,data},'latest']).catch(()=>'0x0');
+      const shares=u(BigInt(bal||'0x0'));
+      if(shares>0.000001) pos.push({id,shares});
+    }
+
+    const gasTotal=rows.reduce((s,r)=>s+(r.gas||0),0);
+    const result={at:Date.now(),from,head,lastBlock:head,mode,addr:ME,rows,pos,gasTotal,bnb,usdt:usdtBal};
+    saveCache(ME,result);
+    render(result);
+    $('status').textContent=`selesai · ${mode} · ${fresh.length} tx baru · total ${rows.length} tx`;
+  }catch(e){
+    showErr(e.message||String(e)); $('status').textContent='gagal';
+  }finally{
+    scanning=false; $('scan').disabled=false; schedule();
+  }
+}
+
+/* ================= render ================= */
+function render(res){
+  const rows=res.rows||[], pos=res.pos||[];
+  let cum=0;
+  const withCum=rows.map(r=>{cum+=r.pnl;return {...r,cum};});
+  const cost=rows.filter(r=>r.type==='BUY').reduce((s,r)=>s+r.usdt,0);
+  const payout=rows.filter(r=>r.type==='REDEEM').reduce((s,r)=>s+r.usdt,0);
+  const pnl=payout-cost;
+  const wins=rows.filter(r=>r.type==='REDEEM').length;
+  const losses=Math.max(rows.filter(r=>r.type==='BUY').length-wins,0);
+
+  $('pnl').textContent=signed(pnl); $('pnl').className='v '+cls(pnl);
+  $('usdt').textContent=fmt(res.usdt,4);
+  $('bnb').textContent=fmt(res.bnb,5);
+  $('wl').textContent=`${wins} / ${losses}`;
+  $('open').textContent=pos.length?`${pos.length} (${fmt(pos.reduce((s,p)=>s+p.shares,0))} sh)`:'0';
+  $('gas').textContent=fmt(res.gasTotal,6);
+  $('lastTxt').textContent=new Date(res.at).toLocaleTimeString('id-ID');
+  $('blkTxt').textContent=res.lastBlock??'—';
+
+  $('rows').innerHTML=withCum.length?withCum.slice().reverse().map(r=>`<tr>
+      <td class="mono">${r.block}</td>
+      <td><span class="badge ${r.type==='BUY'?'buy':'redeem'}">${r.type}</span></td>
+      <td class="mono" title="${(r.tokenIds||[])[0]||''}">${String((r.tokenIds||[])[0]||'—').slice(0,10)}…</td>
+      <td>${fmt(r.shares,4)}</td>
+      <td>${fmt(r.usdt,4)}</td>
+      <td class="${cls(r.pnl)}">${signed(r.pnl,4)}</td>
+      <td class="mono">${fmt(r.gas,7)}</td>
+      <td><a target="_blank" rel="noopener" href="https://bscscan.com/tx/${r.hash}">${r.hash.slice(0,8)}…</a></td>
+    </tr>`).join(''):`<tr><td colspan="8" class="muted">tidak ada transaksi prediksi di rentang ini</td></tr>`;
+
+  $('pos').innerHTML=pos.length?pos.map(p=>`<tr>
+      <td class="mono" title="${p.id}">${p.id.slice(0,12)}…</td>
+      <td>${fmt(p.shares,4)}</td>
+      <td>$${fmt(p.shares,2)} (jika menang)</td>
+    </tr>`).join(''):`<tr><td colspan="3" class="muted">tidak ada posisi terbuka</td></tr>`;
+
+  drawChart(withCum);
+}
+
+function drawChart(rows){
+  const svg=$('chart'), W=600,H=120,P=8;
+  if(!rows.length){ svg.innerHTML=`<text x="${W/2}" y="${H/2}" fill="#8992a7" font-size="12" text-anchor="middle">belum ada data</text>`; return; }
+  const vals=rows.map(r=>r.cum);
+  const min=Math.min(0,...vals), max=Math.max(0,...vals,0.01);
+  const x=(i)=>P+(i/Math.max(vals.length-1,1))*(W-2*P);
+  const y=(v)=>H-P-((v-min)/(max-min||1))*(H-2*P);
+  const last=vals[vals.length-1], color=last>=0?'#27d17c':'#ff5d5d';
+  svg.innerHTML=`
+    <line x1="${P}" y1="${y(0)}" x2="${W-P}" y2="${y(0)}" stroke="#2a3346" stroke-dasharray="3 3"/>
+    <polyline points="${vals.map((v,i)=>`${x(i)},${y(v)}`).join(' ')}" fill="none" stroke="${color}" stroke-width="2"/>
+    <circle cx="${x(vals.length-1)}" cy="${y(last)}" r="3" fill="${color}"/>
+    <text x="${P+2}" y="${Math.max(y(max)-4,10)}" fill="#8992a7" font-size="10">+${max.toFixed(2)}</text>
+    <text x="${P+2}" y="${Math.min(y(min)+12,H-2)}" fill="#8992a7" font-size="10">${min.toFixed(2)}</text>`;
+}
+
+/* ================= jadwal ================= */
+function schedule(){
+  if(timer) clearTimeout(timer);
+  if(ticking) clearInterval(ticking);
+  $('autoTxt').textContent=paused?'pause':'aktif';
+  const ms=intervalMs();
+  const tick=()=>{
+    if(paused){ $('nextTxt').textContent='pause'; return; }
+    const remain=lastScanAt()+ms-Date.now();
+    $('nextTxt').textContent=remain>0?hhmmss(remain):'sekarang';
+    if(remain<=0&&!scanning){ clearInterval(ticking); scan(false); }
+  };
+  ticking=setInterval(tick,1000); tick();
+}
+
+/* ================= boot ================= */
+loadCfg();
+const boot=ck();
+if(boot&&boot.rows){ render(boot); $('status').textContent=`cache ${new Date(boot.at).toLocaleTimeString('id-ID')} · lanjut dari blok ${boot.lastBlock}`; }
+
+$('save').addEventListener('click',saveCfg);
+$('scan').addEventListener('click',()=>scan(true));
+$('toggle').addEventListener('click',()=>{
+  paused=!paused;
+  $('toggle').textContent=paused?'Lanjutkan auto':'Pause auto';
+  if(!paused) schedule(); else { if(ticking) clearInterval(ticking); $('nextTxt').textContent='pause'; }
+});
+$('reset').addEventListener('click',()=>{
+  const a=$('addr').value.trim();
+  localStorage.removeItem(cacheKey(a));
+  flashOk('Cache alamat ini dihapus. Scan berikutnya akan penuh (lookback awal).');
+  $('blkTxt').textContent='—'; $('modeTxt').textContent='—';
+  schedule();
+});
+
+if(!boot || Date.now()-boot.at>intervalMs()) scan(false); else schedule();
+</script>
+</body>
+</html>
